@@ -342,12 +342,16 @@ def evaluate_pipeline(
     index_path: str = "data/severstal_ivfpq.index",
     labels_path: str = "data/severstal_labels.npy",
     output_dir: str = "results",
-    num_samples: int = 10,
+    num_samples: int = 20,
     k: int = 5,
-) -> None:
+) -> Dict[str, Union[float, List[Dict]]]:
     """
-    Runs full evaluation on a subset of annotated images and produces metric summaries and visual plots.
+    Runs full evaluation on a subset of annotated images and produces metric summaries,
+    structured JSON/CSV reports, and high-resolution visual plots.
     """
+    import json
+    import pandas as pd
+
     os.makedirs(output_dir, exist_ok=True)
     inspector = DefectInspector(index_path=index_path, labels_path=labels_path, k=k)
 
@@ -365,36 +369,133 @@ def evaluate_pipeline(
         remaining = num_samples - len(selected_indices)
         selected_indices.extend(normal_indices[: min(len(normal_indices), remaining)])
 
-    all_metrics = []
+    per_image_results = []
+    total_pixels_correct = 0
+    total_pixels_count = 0
+    total_patches_correct = 0
+    total_patches_count = 0
+    correct_binary_image_preds = 0
 
     for i, idx in enumerate(tqdm(selected_indices, desc="Evaluating Inspection Samples")):
         sample = dataset[idx]
         image_id = sample["image_id"]
         image_path = os.path.join(img_dir, image_id)
-        gt_mask = sample["full_mask"].numpy()  # [4, 256, 1600]
+        gt_mask_4ch = sample["full_mask"].numpy()  # [4, 256, 1600]
+
+        # Ground truth full class map
+        gt_class_map = np.zeros((256, 1600), dtype=np.uint8)
+        for c in range(1, 5):
+            gt_class_map[gt_mask_4ch[c - 1] > 0] = c
+
+        # Ground truth patch grid
+        gt_patch_grid = np.zeros((16, 16), dtype=np.uint8)
+        for c in range(1, 5):
+            gt_patch_grid[sample["mask_16x16"][c - 1].numpy() > 0] = c
 
         output_plot_path = os.path.join(output_dir, f"inspection_{i+1:02d}_{image_id.split('.')[0]}.png")
         res = inspector.evaluate_image(
             image_path_or_tensor=image_path if os.path.exists(image_path) else sample["image"],
-            ground_truth_mask=gt_mask,
+            ground_truth_mask=gt_mask_4ch,
             output_path=output_plot_path,
             image_id=image_id,
         )
-        all_metrics.append(res["metrics"])
 
-    # Aggregate metric summary
-    if all_metrics:
-        avg_dice = np.mean([m["mean_dice"] for m in all_metrics])
-        avg_iou = np.mean([m["mean_iou"] for m in all_metrics])
-        print("\n" + "=" * 50)
-        print("EVALUATION METRICS SUMMARY:")
-        print(f"  Average Mean Dice Score: {avg_dice:.4f}")
-        print(f"  Average Mean IoU Score:  {avg_iou:.4f}")
-        for c in range(1, 5):
-            c_dice = np.mean([m[f"dice_class_{c}"] for m in all_metrics])
-            c_iou = np.mean([m[f"iou_class_{c}"] for m in all_metrics])
-            print(f"  Class {c} ({CLASS_NAMES[c]}): Dice={c_dice:.4f}, IoU={c_iou:.4f}")
-        print("=" * 50)
+        pred_class_map = res["predicted_class_map"]
+        patch_preds = res["patch_preds_16x16"]
+
+        # Pixel accuracy
+        pix_corr = int(np.sum(pred_class_map == gt_class_map))
+        pix_tot = gt_class_map.size
+        total_pixels_correct += pix_corr
+        total_pixels_count += pix_tot
+        pix_acc = pix_corr / pix_tot
+
+        # Patch accuracy
+        patch_corr = int(np.sum(patch_preds == gt_patch_grid))
+        patch_tot = gt_patch_grid.size
+        total_patches_correct += patch_corr
+        total_patches_count += patch_tot
+        patch_acc = patch_corr / patch_tot
+
+        # Image-level binary detection
+        gt_has_defect = bool(sample["has_defect"])
+        pred_has_defect = bool(np.any(pred_class_map > 0))
+        if gt_has_defect == pred_has_defect:
+            correct_binary_image_preds += 1
+
+        img_record = {
+            "image_id": image_id,
+            "has_defect_gt": gt_has_defect,
+            "has_defect_pred": pred_has_defect,
+            "pixel_accuracy": float(pix_acc),
+            "patch_accuracy": float(patch_acc),
+            "mean_dice": float(res["metrics"]["mean_dice"]),
+            "mean_iou": float(res["metrics"]["mean_iou"]),
+            "dice_class_1": float(res["metrics"]["dice_class_1"]),
+            "dice_class_2": float(res["metrics"]["dice_class_2"]),
+            "dice_class_3": float(res["metrics"]["dice_class_3"]),
+            "dice_class_4": float(res["metrics"]["dice_class_4"]),
+            "iou_class_1": float(res["metrics"]["iou_class_1"]),
+            "iou_class_2": float(res["metrics"]["iou_class_2"]),
+            "iou_class_3": float(res["metrics"]["iou_class_3"]),
+            "iou_class_4": float(res["metrics"]["iou_class_4"]),
+            "plot_path": output_plot_path,
+        }
+        per_image_results.append(img_record)
+
+    # Aggregate summaries
+    overall_pixel_acc = total_pixels_correct / max(1, total_pixels_count)
+    overall_patch_acc = total_patches_correct / max(1, total_patches_count)
+    overall_binary_acc = correct_binary_image_preds / max(1, len(selected_indices))
+    avg_dice = float(np.mean([m["mean_dice"] for m in per_image_results]))
+    avg_iou = float(np.mean([m["mean_iou"] for m in per_image_results]))
+
+    summary = {
+        "num_evaluated_images": len(selected_indices),
+        "image_level_binary_accuracy": float(overall_binary_acc),
+        "patch_level_accuracy": float(overall_patch_acc),
+        "pixel_level_accuracy": float(overall_pixel_acc),
+        "average_mean_dice": float(avg_dice),
+        "average_mean_iou": float(avg_iou),
+        "per_class_metrics": {
+            f"class_{c}": {
+                "name": CLASS_NAMES[c],
+                "avg_dice": float(np.mean([m[f"dice_class_{c}"] for m in per_image_results])),
+                "avg_iou": float(np.mean([m[f"iou_class_{c}"] for m in per_image_results])),
+            }
+            for c in range(1, 5)
+        },
+        "per_image_details": per_image_results,
+    }
+
+    # Save to JSON
+    json_path = os.path.join(output_dir, "metrics_summary.json")
+    with open(json_path, "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"Saved quantitative JSON summary to: {json_path}")
+
+    # Save to CSV
+    csv_out_path = os.path.join(output_dir, "metrics_summary.csv")
+    df_metrics = pd.DataFrame(per_image_results)
+    df_metrics.to_csv(csv_out_path, index=False)
+    print(f"Saved quantitative CSV table to: {csv_out_path}")
+
+    # Print Console Summary
+    print("\n" + "=" * 60)
+    print("QUANTITATIVE EVALUATION SUMMARY:")
+    print(f"  Evaluated Samples:                {len(selected_indices)}")
+    print(f"  Image-Level Defect Accuracy:      {overall_binary_acc * 100:.2f}%")
+    print(f"  Patch-Level Grid Accuracy:        {overall_patch_acc * 100:.2f}%")
+    print(f"  Pixel-Level Exact Accuracy:       {overall_pixel_acc * 100:.2f}%")
+    print(f"  Mean Dice Score (All Classes):    {avg_dice:.4f}")
+    print(f"  Mean IoU Score (All Classes):     {avg_iou:.4f}")
+    for c in range(1, 5):
+        c_dice = summary["per_class_metrics"][f"class_{c}"]["avg_dice"]
+        c_iou = summary["per_class_metrics"][f"class_{c}"]["avg_iou"]
+        print(f"  {CLASS_NAMES[c]}: Dice={c_dice:.4f}, IoU={c_iou:.4f}")
+    print("=" * 60)
+
+    return summary
 
 
 def main():
