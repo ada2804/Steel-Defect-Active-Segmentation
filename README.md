@@ -84,16 +84,53 @@ $$
 
 ---
 
-## 3. Benchmark Results & Training Visuals
+## 3. Benchmark Results & Quantitative Evaluation
 
-### A. 30-Epoch Full-Scale Benchmark Progression
-The architecture was trained across **100% of the Severstal dataset** (5,333 training samples / 1,333 validation samples) for **30 epochs** with pre-cached DINOv2 representations and compound `BCEDiceLoss`.
+### A. Stage 1: Active Learning Data Engine & Continuous Human-in-the-Loop Progression
 
-![Training Loss and Dice Progression Curves](results/training_curves.png)
+In real industrial steel rolling, **over 95% of manufactured strips are defect-free**. Forcing human inspectors to review uncurated video streams wastes massive amounts of labor on clean steel. 
+
+The Stage 1 Active Learning Data Engine starts with just **50 normal steel images** (12,800 quantized patch vectors) and uses human feedback as a continuous learning flywheel:
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ THE ACTIVE LEARNING CONTINUOUS FLYWHEEL:                                               │
+│                                                                                        │
+│  [1. Initial Bootstrap] ──► 50 Normal Images in FAISS Memory Bank (12,800 vectors)    │
+│                                      │                                                 │
+│                                      ▼                                                 │
+│  [2. Human Review Batch 1] ──► Human Inspects Top 500 Anomaly Candidates:              │
+│                                • 323 True Defects ──► Added to Supervised Training Set │
+│                                • 177 False Alarms ──► Ingested into Normal FAISS Bank  │
+│                                      │                                                 │
+│                                      ▼                                                 │
+│  [3. Active Learning Batch 2]──► Memory Bank Expands (227 Normal Sheets / 58,112 vecs) │
+│                                • Precision jumps 64.6% ──► 75.4% (+10.8% gain)         │
+│                                • Defective sheets caught jumps 323 ──► 377 (+54 more)  │
+│                                • Wasted reviews drop 177 ──► 123 (-30.5% reduction)    │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Quantitative Human Review Effort Comparison:
+
+| Review Paradigm | Normal Memory Bank | Defective Sheets Caught (in 500 Reviews) | Review Precision (Useful Human Work) | Wasted Reviews (Clean Sheets) | Wasted Human Effort |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **Naive Baseline (No Active Learning)** | **Zero / Uniform Random Sampling** | **~25 / 500** | **`~5.0%`** | **475 / 500** | **95.0% Wasted** |
+| **Active Learning Round 1** | **Initial 50 Normal Images** (12,800 Vectors) | **323 / 500** | **`64.6%`** | **177 / 500** | 35.4% Wasted |
+| **Active Learning Round 2** | **+177 Hard Negatives Ingested** (227 Normals) | **377 / 500** *(+54 more defects)* | **`75.4%`** *(+10.8% gain)* | **123 / 500** *(-30.5% fewer false alarms)* | **`24.6%` Wasted** |
+| **Continuous Target ($\ge \text{Round 3}$)** | Dynamic Memory Bank (500+ Normals) | **425+ / 500** | **`85%+`** | **<75 / 500** | **<15.0% Wasted** |
+
+> **Key Takeaway:** Without this system, a factory worker reviewing 500 random images wastes **95% of their workday** looking at 475 clean sheets. With Stage 1, precision instantly reaches **64.6%** in Round 1 and **75.4%** in Round 2, slashing wasted reviews from **475 down to 123** while capturing significantly more defects.
 
 ---
 
-### B. Quantitative Performance Summary
+### B. Stage 2: Supervised DINOv2-UNet Segmentation Benchmark (81.29% Dice)
+
+The progressive U-Net decoder was trained on top of the frozen DINOv2 ViT-B/14 backbone across **100% of the Severstal dataset** (5,333 training samples / 1,333 validation samples) for **30 epochs** using compound `BCEDiceLoss`.
+
+![Training Loss and Dice Progression Curves](results/training_curves.png)
+
+#### 30-Epoch Full-Scale Validation Metrics:
 
 | Metric | Full Benchmark (100% Data, 30 Epochs) | Industrial Significance |
 | :--- | :---: | :--- |
@@ -108,38 +145,9 @@ The architecture was trained across **100% of the Severstal dataset** (5,333 tra
 
 > Complete per-epoch metric logs are saved in [`results/training_history.json`](results/training_history.json).
 
-### C. Stage 1: Active Learning Flywheel & Continuous Human-in-the-Loop Progression
-
-In real manufacturing, **over 95% of manufactured steel is completely defect-free**. The Active Learning Data Engine eliminates wasted human effort by mining high-probability defect candidates and continuously learning from human feedback:
-
-| Review Paradigm | Input / Setup | Defective Sheets Caught (in 500 Reviews) | Review Precision (Useful Human Time) | Wasted Human Reviews (Clean Sheets) | Wasted Effort Rate |
-| :--- | :--- | :---: | :---: | :---: | :---: |
-| **Naive Baseline (Uniform Sampling)** | No Anomaly Filter (Uniform Random) | **~25 / 500** | **`~5.0%`** | **475 / 500** | **95.0% Wasted** |
-| **Active Learning Round 1** | **Initial 50 Normal Images** (12,800 Vectors) | **323 / 500** | **`64.6%`** | **177 / 500** | 35.4% Wasted |
-| **Active Learning Round 2** | **+177 Hard Negatives Ingested** (227 Normals) | **377 / 500** *(+54 more defects)* | **`75.4%`** *(+10.8% gain)* | **123 / 500** *(-30.5% fewer false alarms)* | **`24.6%` Wasted** |
-| **Continuous Target ($\ge \text{Round 3}$)** | Dynamic Memory Bank (500+ Normals) | **425+ / 500** | **`85%+`** | **<75 / 500** | **<15.0% Wasted** |
-
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ THE ACTIVE LEARNING FLYWHEEL:                                                          │
-│                                                                                        │
-│  [1. Initial State] ──► 50 Normal Images in FAISS Memory Bank (12,800 patch vectors)  │
-│                               │                                                        │
-│                               ▼                                                        │
-│  [2. Review Top 500] ──► Human Reviewer Evaluates:                                     │
-│                           • 323 True Defects ──► Forwarded to Stage 2 Training Set     │
-│                           • 177 False Alarms ──► Re-injected as Hard Negatives in FAISS│
-│                               │                                                        │
-│                               ▼                                                        │
-│  [3. Rescan Next 500] ──► Memory bank expands (227 normal sheets / 58,112 vectors)    │
-│                           • Precision surges to 75.4% (+54 more defects captured)      │
-│                           • Wasted reviews drop from 177 ──► 123 (-30.5% reduction)    │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
 ---
 
-### D. Stage-by-Stage Performance Comparison
+### C. End-to-End Stage-by-Stage Synergy
 
 | Evaluation Dimension | Stage 1: Active Learning FAISS Data Engine | Stage 2: Supervised DinoUNetDecoder |
 | :--- | :---: | :---: |
