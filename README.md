@@ -165,25 +165,28 @@ $$
 
 If $S(x) > \tau$, image $x$ is flagged and routed to `data/flagged_for_human_review.csv` for human verification.
 
----
-
 #### 2. Stage 2: Feature Folding & Progressive U-Net Decoding
 
-1. **Feature Extraction**:
-   - $Z = \text{DINOv2}(x) \in \mathbb{R}^{B \times 256 \times 768}$
-2. **Spatial Reshaping (Patch Folding)**:
-   - $Z_{\text{grid}} = \text{Reshape}(Z) \in \mathbb{R}^{B \times 768 \times 16 \times 16}$
-3. **Channel Projection**:
-   - $H_0 = \text{ReLU}(\text{BatchNorm}(\text{Conv2D}_{1 \times 1}(Z_{\text{grid}}))) \in \mathbb{R}^{B \times 128 \times 16 \times 16}$
-4. **4-Stage Progressive Upsampling**:
-   - **Block 1 ($16 \to 32$)**: $H_1 = \text{ConvBlock}(\text{ConvTranspose2d}(H_0)) \in \mathbb{R}^{B \times 64 \times 32 \times 32}$
-   - **Block 2 ($32 \to 64$)**: $H_2 = \text{ConvBlock}(\text{ConvTranspose2d}(H_1)) \in \mathbb{R}^{B \times 32 \times 64 \times 64}$
-   - **Block 3 ($64 \to 128$)**: $H_3 = \text{ConvBlock}(\text{ConvTranspose2d}(H_2)) \in \mathbb{R}^{B \times 16 \times 128 \times 128}$
-   - **Block 4 ($128 \to 224$)**: $H_4 = \text{ConvBlock}(\text{Bilinear}(\text{ConvTranspose2d}(H_3))) \in \mathbb{R}^{B \times 16 \times 224 \times 224}$
-5. **Output Multi-Class Logits**:
-   - $\text{Logits} = \text{Conv2D}_{1 \times 1}(H_4) \in \mathbb{R}^{B \times 4 \times 224 \times 224}$
-6. **Compound Loss Function**:
-   - $\mathcal{L}_{\text{total}} = 0.5 \cdot \mathcal{L}_{\text{BCE}} + 0.5 \cdot \mathcal{L}_{\text{SoftDice}}$
+```python
+# Forward Tensor Transformations & Layer Dimensions
+1. Feature Extraction:   Z      = DINOv2(x)                      # [B, 256, 768] (Frozen ViT-B/14 tokens)
+2. Spatial Grid Folding: Z_grid = Reshape(Z)                     # [B, 768, 16, 16] (Spatial 16x16 grid)
+3. Channel Projection:   H_0    = ReLU(BatchNorm(Conv2D(Z_grid)))# [B, 128, 16, 16]
+
+4. 4-Stage Progressive Upsampling:
+   • Block 1 (16 -> 32):  H_1    = ConvBlock(ConvTranspose2d(H_0)) # [B, 64, 32, 32]
+   • Block 2 (32 -> 64):  H_2    = ConvBlock(ConvTranspose2d(H_1)) # [B, 32, 64, 64]
+   • Block 3 (64 -> 128): H_3    = ConvBlock(ConvTranspose2d(H_2)) # [B, 16, 128, 128]
+   • Block 4 (128-> 224): H_4    = ConvBlock(Bilinear(ConvT(H_3))) # [B, 16, 224, 224]
+
+5. Multi-Class Output:   Logits = Conv2D_1x1(H_4)                 # [B, 4, 224, 224] (4 defect channels)
+```
+
+**Compound Loss Function:**
+
+$$
+\mathcal{L}_{\text{total}} = 0.5 \cdot \mathcal{L}_{\text{BCE}} + 0.5 \cdot \mathcal{L}_{\text{SoftDice}}
+$$
 
 ---
 
