@@ -75,7 +75,11 @@ The Kaggle Severstal competition requires localizing and segmenting **4 distinct
 * **Class 4 (Patches)**: Large, irregularly shaped surface blemishes and rolled-in scale.
 
 Evaluation is performed using the **Mean Dice Similarity Coefficient** with True Negative handling:
-$$\text{Dice}(P, G) = \frac{2 \times |P \cap G|}{|P| + |G|}$$
+
+$$
+\text{Dice}(P, G) = \frac{2 \times |P \cap G|}{|P| + |G|}
+$$
+
 *(If both prediction $P$ and ground truth $G$ are empty for a given class on an image, $\text{Dice} = 1.0$).*
 
 ---
@@ -148,22 +152,38 @@ The architecture is decoupled into two complementary stages:
 
 #### 1. Stage 1: Zero-Shot Patch Anomaly Distance
 For a test image $x$, DINOv2 generates 256 patch tokens $\{z_i\}_{i=1}^{256}$. For each token, the minimum $L_2$ distance to the quantized normal centroids $\mathcal{C}_{\text{normal}}$ is computed:
-$$d_i = \min_{c \in \mathcal{C}_{\text{normal}}} \|z_i - c\|_2$$
-The image anomaly score is:
-$$S(x) = \max_{i \in \{1 \dots 256\}} d_i$$
-If $S(x) > \tau$, image $x$ is flagged to `data/flagged_for_human_review.csv`.
+
+$$
+d_i = \min_{c \in \mathcal{C}_{\text{normal}}} \|z_i - c\|_2
+$$
+
+The image-level anomaly score is the maximum patch distance:
+
+$$
+S(x) = \max_{i \in \{1 \dots 256\}} d_i
+$$
+
+If $S(x) > \tau$, image $x$ is flagged and routed to `data/flagged_for_human_review.csv` for human verification.
+
+---
 
 #### 2. Stage 2: Feature Folding & Progressive U-Net Decoding
-1. **Feature Extraction**: $Z = \text{DINOv2}(x) \in \mathbb{R}^{B \times 256 \times 768}$
-2. **Spatial Reshaping**: $Z_{\text{grid}} = \text{Reshape}(Z) \in \mathbb{R}^{B \times 768 \times 16 \times 16}$
-3. **Channel Projection**: $H_0 = \text{ReLU}(\text{BatchNorm}(\text{Conv2D}_{1 \times 1}(Z_{\text{grid}}))) \in \mathbb{R}^{B \times 128 \times 16 \times 16}$
+
+1. **Feature Extraction**:
+   - $Z = \text{DINOv2}(x) \in \mathbb{R}^{B \times 256 \times 768}$
+2. **Spatial Reshaping (Patch Folding)**:
+   - $Z_{\text{grid}} = \text{Reshape}(Z) \in \mathbb{R}^{B \times 768 \times 16 \times 16}$
+3. **Channel Projection**:
+   - $H_0 = \text{ReLU}(\text{BatchNorm}(\text{Conv2D}_{1 \times 1}(Z_{\text{grid}}))) \in \mathbb{R}^{B \times 128 \times 16 \times 16}$
 4. **4-Stage Progressive Upsampling**:
    - **Block 1 ($16 \to 32$)**: $H_1 = \text{ConvBlock}(\text{ConvTranspose2d}(H_0)) \in \mathbb{R}^{B \times 64 \times 32 \times 32}$
    - **Block 2 ($32 \to 64$)**: $H_2 = \text{ConvBlock}(\text{ConvTranspose2d}(H_1)) \in \mathbb{R}^{B \times 32 \times 64 \times 64}$
    - **Block 3 ($64 \to 128$)**: $H_3 = \text{ConvBlock}(\text{ConvTranspose2d}(H_2)) \in \mathbb{R}^{B \times 16 \times 128 \times 128}$
    - **Block 4 ($128 \to 224$)**: $H_4 = \text{ConvBlock}(\text{Bilinear}(\text{ConvTranspose2d}(H_3))) \in \mathbb{R}^{B \times 16 \times 224 \times 224}$
-5. **Output Logits**: $\text{Logits} = \text{Conv2D}_{1 \times 1}(H_4) \in \mathbb{R}^{B \times 4 \times 224 \times 224}$
-6. **Compound Loss**: $\mathcal{L} = 0.5 \cdot \mathcal{L}_{\text{BCE}} + 0.5 \cdot \mathcal{L}_{\text{SoftDice}}$
+5. **Output Multi-Class Logits**:
+   - $\text{Logits} = \text{Conv2D}_{1 \times 1}(H_4) \in \mathbb{R}^{B \times 4 \times 224 \times 224}$
+6. **Compound Loss Function**:
+   - $\mathcal{L}_{\text{total}} = 0.5 \cdot \mathcal{L}_{\text{BCE}} + 0.5 \cdot \mathcal{L}_{\text{SoftDice}}$
 
 ---
 
