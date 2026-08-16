@@ -1,6 +1,5 @@
 # Data and Large Artifacts
 data/
-results/
 *.index
 *.npy
 *.pth
@@ -8,6 +7,13 @@ results/
 *.bin
 *.tar.gz
 *.zip
+
+# Ignore results weights but track visual plots and metrics
+results/*.pth
+results/*.pt
+results/*.bin
+!results/training_curves.png
+!results/training_history.json
 
 # Python & Environment
 __pycache__/
@@ -27,7 +33,6 @@ lib/
 lib64/
 parts/
 sdist/
-var/
 wheels/
 *.egg-info/
 .installed.cfg
