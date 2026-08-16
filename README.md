@@ -252,8 +252,8 @@ python -m src.mine_anomalies \
     --img_dir data/severstal/train_images \
     --csv_path data/severstal/train.csv \
     --num_normal 50 \
-    --max_unlabeled 100 \
-    --threshold 100.0 \
+    --max_unlabeled 5333 \
+    --threshold 1200.0 \
     --output_csv data/flagged_for_human_review.csv
 ```
 
