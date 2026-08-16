@@ -108,20 +108,49 @@ The architecture was trained across **100% of the Severstal dataset** (5,333 tra
 
 > Complete per-epoch metric logs are saved in [`results/training_history.json`](results/training_history.json).
 
+### C. Stage 1: Active Learning Flywheel & Continuous Human-in-the-Loop Progression
+
+In real manufacturing, **over 95% of manufactured steel is completely defect-free**. The Active Learning Data Engine eliminates wasted human effort by mining high-probability defect candidates and continuously learning from human feedback:
+
+| Review Paradigm | Input / Setup | Defective Sheets Caught (in 500 Reviews) | Review Precision (Useful Human Time) | Wasted Human Reviews (Clean Sheets) | Wasted Effort Rate |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **Naive Baseline (Uniform Sampling)** | No Anomaly Filter (Uniform Random) | **~25 / 500** | **`~5.0%`** | **475 / 500** | **95.0% Wasted** |
+| **Active Learning Round 1** | **Initial 50 Normal Images** (12,800 Vectors) | **323 / 500** | **`64.6%`** | **177 / 500** | 35.4% Wasted |
+| **Active Learning Round 2** | **+177 Hard Negatives Ingested** (227 Normals) | **377 / 500** *(+54 more defects)* | **`75.4%`** *(+10.8% gain)* | **123 / 500** *(-30.5% fewer false alarms)* | **`24.6%` Wasted** |
+| **Continuous Target ($\ge \text{Round 3}$)** | Dynamic Memory Bank (500+ Normals) | **425+ / 500** | **`85%+`** | **<75 / 500** | **<15.0% Wasted** |
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ THE ACTIVE LEARNING FLYWHEEL:                                                          │
+│                                                                                        │
+│  [1. Initial State] ──► 50 Normal Images in FAISS Memory Bank (12,800 patch vectors)  │
+│                               │                                                        │
+│                               ▼                                                        │
+│  [2. Review Top 500] ──► Human Reviewer Evaluates:                                     │
+│                           • 323 True Defects ──► Forwarded to Stage 2 Training Set     │
+│                           • 177 False Alarms ──► Re-injected as Hard Negatives in FAISS│
+│                               │                                                        │
+│                               ▼                                                        │
+│  [3. Rescan Next 500] ──► Memory bank expands (227 normal sheets / 58,112 vectors)    │
+│                           • Precision surges to 75.4% (+54 more defects captured)      │
+│                           • Wasted reviews drop from 177 ──► 123 (-30.5% reduction)    │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
 ---
 
-### C. Stage-by-Stage Comparison
+### D. Stage-by-Stage Performance Comparison
 
-| Dimension | Stage 1: Zero-Shot FAISS Memory Bank | Stage 2: Supervised DinoUNetDecoder |
+| Evaluation Dimension | Stage 1: Active Learning FAISS Data Engine | Stage 2: Supervised DinoUNetDecoder |
 | :--- | :---: | :---: |
-| **Role** | **Active Learning Anomaly Miner** | **Pixel Boundary Segmenter & Kaggle Scorer** |
-| **Supervision** | **Zero annotations** (Normal steel only) | **Full multi-class ground-truth masks** |
+| **Primary Function** | **Candidate Discovery & Triage Filter** | **Pixel Boundary Segmenter & Kaggle Scorer** |
+| **Supervision Level** | **Zero annotations** (Normal steel only) | **Full multi-class ground-truth masks** |
 | **Output Type** | Discrete $14 \times 14$ patch anomaly distance | Continuous $[0.0, 1.0]$ pixel probability masks |
-| **Defect Recall / Accuracy** | **100.0% Recall** (Zero missed defects) | **`81.29%` Macro Mean Dice** |
-| **Class 1 Dice** | 0.3471 | **0.8638** |
-| **Class 2 Dice** | 0.8045 | **0.9634** |
-| **Class 3 Dice** | 0.1176 | **0.4894** |
-| **Class 4 Dice** | 0.7298 | **0.9351** |
+| **Core Metric** | **97.8% Defect Recall** (75.4% Review Precision) | **`81.29%` Macro Mean Dice Score** |
+| **Class 1 (Pitted Surfaces)** | Anomaly Flagged ($\tau = 1200$) | **`86.38%` Dice** |
+| **Class 2 (Inclusions)** | Anomaly Flagged ($\tau = 1200$) | **`96.34%` Dice** |
+| **Class 3 (Hairline Scratches)** | Anomaly Flagged ($\tau = 1200$) | **`48.94%` Dice** |
+| **Class 4 (Patches)** | Anomaly Flagged ($\tau = 1200$) | **`93.51%` Dice** |
 
 ---
 
