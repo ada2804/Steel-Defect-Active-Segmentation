@@ -56,6 +56,13 @@ data/severstal/
 python -m unittest discover tests
 ```
 
+### D. Interactive 1-Click Reproduction Notebook
+You can reproduce all benchmark results, Active Learning triage metrics, and visual defect heatmaps interactively:
+```bash
+jupyter notebook notebooks/exploration_and_demo.ipynb
+```
+*(Or open [`notebooks/exploration_and_demo.ipynb`](notebooks/exploration_and_demo.ipynb) directly in VS Code / Jupyter Lab and click **Run All**).*
+
 ---
 
 ## 2. Project Overview & Kaggle Challenge Context
@@ -287,6 +294,12 @@ python -m src.generate_submission \
 ### 4. Run Automated Unit Test Suite
 ```bash
 python -m unittest discover tests
+```
+
+### 5. Interactive Notebook Walkthrough
+To run the full end-to-end pipeline step-by-step with interactive visual plots:
+```bash
+jupyter notebook notebooks/exploration_and_demo.ipynb
 ```
 
 ---
