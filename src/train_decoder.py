@@ -2,7 +2,7 @@
 Supervised Training Loop for DinoUNetDecoder.
 
 Trains the progressive convolutional decoder on top of frozen DINOv2 ViT-B/14
-features using BCEWithLogitsLoss and monitors Validation Dice Scores.
+features using BCEDiceLoss / BCEWithLogitsLoss and monitors Validation Dice Scores.
 Pre-caches frozen features in memory for lightning-fast training throughput.
 Saves the best decoder weights to results/best_unet_decoder.pth.
 """
@@ -21,6 +21,7 @@ from tqdm import tqdm
 
 from src.build_index import extract_patch_embeddings
 from src.dataset import SeverstalUNetDataset
+from src.losses import BCEDiceLoss
 from src.model import DinoUNetDecoder
 
 
@@ -46,31 +47,38 @@ def compute_batch_dice(
     smooth: float = 1e-6,
 ) -> Dict[str, float]:
     """
-    Computes per-class and mean Dice score for a batch of predictions.
+    Computes per-class and mean sample-level Dice score matching Kaggle Severstal evaluation.
+    If both ground truth and prediction for a class are empty on a sample, score is 1.0 (True Negative).
     """
     probs = torch.sigmoid(pred_logits)
     preds = (probs >= threshold).float()
+    batch_size = pred_logits.size(0)
 
-    dices = []
-    class_dices = {}
+    class_dices = {f"dice_class_{c+1}": [] for c in range(4)}
 
-    for c in range(4):
-        p_c = preds[:, c].reshape(-1)
-        t_c = targets[:, c].reshape(-1)
+    for i in range(batch_size):
+        for c in range(4):
+            p = preds[i, c].view(-1)
+            t = targets[i, c].view(-1)
 
-        intersection = torch.sum(p_c * t_c).item()
-        total = torch.sum(p_c).item() + torch.sum(t_c).item()
+            p_sum = torch.sum(p).item()
+            t_sum = torch.sum(t).item()
+            intersection = torch.sum(p * t).item()
 
-        if total == 0:
-            dice = 1.0
-        else:
-            dice = (2.0 * intersection + smooth) / (total + smooth)
+            if p_sum == 0 and t_sum == 0:
+                dice = 1.0  # Clean image, correctly predicted empty
+            elif p_sum > 0 and t_sum == 0:
+                dice = 0.0  # False alarm
+            elif p_sum == 0 and t_sum > 0:
+                dice = 0.0  # Missed defect
+            else:
+                dice = (2.0 * intersection + smooth) / (p_sum + t_sum + smooth)
 
-        class_dices[f"dice_class_{c+1}"] = float(dice)
-        dices.append(dice)
+            class_dices[f"dice_class_{c+1}"].append(dice)
 
-    class_dices["mean_dice"] = float(np.mean(dices))
-    return class_dices
+    mean_class_dices = {k: float(np.mean(v)) for k, v in class_dices.items()}
+    mean_class_dices["mean_dice"] = float(np.mean([mean_class_dices[f"dice_class_{c+1}"] for c in range(4)]))
+    return mean_class_dices
 
 
 def extract_and_cache_dataset(
@@ -87,7 +95,7 @@ def extract_and_cache_dataset(
     all_masks = []
     all_ids = []
 
-    print(f"[Caching] Extracting frozen DINOv2 representations for {len(dataset)} images...")
+    print(f"[Caching] Extracting frozen DINOv2 representations for {len(dataset)} images...", flush=True)
     with torch.no_grad():
         for batch in tqdm(loader, desc="Caching DINOv2 Embeddings"):
             imgs = batch["image"].to(device)
@@ -102,7 +110,7 @@ def extract_and_cache_dataset(
     cached_features = torch.cat(all_features, dim=0)
     cached_masks = torch.cat(all_masks, dim=0)
 
-    print(f"[Caching] Caching completed: Features {cached_features.shape}, Masks {cached_masks.shape}")
+    print(f"[Caching] Caching completed: Features {cached_features.shape}, Masks {cached_masks.shape}", flush=True)
     return CachedFeatureDataset(cached_features, cached_masks, all_ids)
 
 
@@ -182,6 +190,7 @@ def train_decoder(
     lr: float = 1e-4,
     val_split: float = 0.20,
     subset_fraction: Optional[float] = None,
+    loss_type: str = "bce_dice",
     device_str: Optional[str] = None,
 ) -> DinoUNetDecoder:
     """
@@ -192,8 +201,8 @@ def train_decoder(
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print(f"\n[Training] Using Device: {device}")
-    print(f"[Training] Loading Dataset from {img_dir}...")
+    print(f"\n[Training] Using Device: {device}", flush=True)
+    print(f"[Training] Loading Dataset from {img_dir}...", flush=True)
 
     full_raw_dataset = SeverstalUNetDataset(
         img_dir=img_dir,
@@ -202,7 +211,7 @@ def train_decoder(
     )
 
     # Initialize Hybrid Model
-    print("[Training] Initializing DinoUNetDecoder...")
+    print("[Training] Initializing DinoUNetDecoder...", flush=True)
     model = DinoUNetDecoder(num_classes=4, device=device)
 
     # Pre-extract representations (runs once!)
@@ -216,14 +225,21 @@ def train_decoder(
     torch.manual_seed(42)
     train_dataset, val_dataset = random_split(cached_dataset, [train_size, val_size])
 
-    print(f"[Training] Dataset Split: {train_size} Train Samples | {val_size} Validation Samples")
+    print(f"[Training] Dataset Split: {train_size} Train Samples | {val_size} Validation Samples", flush=True)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     # Optimizer strictly for decoder parameters
     optimizer = torch.optim.AdamW(model.decoder.parameters(), lr=lr, weight_decay=1e-2)
-    criterion = nn.BCEWithLogitsLoss()
+
+    # Loss function configuration
+    if loss_type == "bce_dice":
+        criterion = BCEDiceLoss(bce_weight=0.5, dice_weight=0.5)
+        print("[Training] Loss Criterion: BCEDiceLoss (50% BCE + 50% Soft Dice)", flush=True)
+    else:
+        criterion = nn.BCEWithLogitsLoss()
+        print("[Training] Loss Criterion: Standard BCEWithLogitsLoss", flush=True)
 
     history = {
         "train_loss": [],
@@ -239,9 +255,9 @@ def train_decoder(
     best_val_dice = -1.0
     os.makedirs(os.path.dirname(os.path.abspath(output_model_path)), exist_ok=True)
 
-    print("\n" + "=" * 70)
-    print(f"STARTING U-NET DECODER SUPERVISED TRAINING ({epochs} EPOCHS)")
-    print("=" * 70)
+    print("\n" + "=" * 70, flush=True)
+    print(f"STARTING U-NET DECODER SUPERVISED TRAINING ({epochs} EPOCHS)", flush=True)
+    print("=" * 70, flush=True)
 
     start_time = time.time()
 
@@ -305,7 +321,7 @@ def _plot_curves(history: Dict[str, List[float]], output_path: str) -> None:
     # Loss Plot
     axes[0].plot(epochs, history["train_loss"], "b-o", label="Train Loss")
     axes[0].plot(epochs, history["val_loss"], "r-s", label="Val Loss")
-    axes[0].set_title("BCE Loss Curve", fontsize=12, fontweight="bold")
+    axes[0].set_title("Training Loss Curve", fontsize=12, fontweight="bold")
     axes[0].set_xlabel("Epoch")
     axes[0].set_ylabel("Loss")
     axes[0].grid(True, linestyle="--", alpha=0.6)
@@ -325,7 +341,7 @@ def _plot_curves(history: Dict[str, List[float]], output_path: str) -> None:
     plt.tight_layout()
     plt.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
-    print(f"Saved training curve figure to {output_path}")
+    print(f"Saved training curve figure to {output_path}", flush=True)
 
 
 def main():
@@ -338,6 +354,7 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for AdamW")
     parser.add_argument("--val_split", type=float, default=0.20, help="Validation set split fraction")
     parser.add_argument("--subset_fraction", type=float, default=None, help="Fraction of dataset to use for quick experiments")
+    parser.add_argument("--loss", type=str, default="bce_dice", choices=["bce_dice", "bce"], help="Loss function to use")
 
     args = parser.parse_args()
 
@@ -350,6 +367,7 @@ def main():
         lr=args.lr,
         val_split=args.val_split,
         subset_fraction=args.subset_fraction,
+        loss_type=args.loss,
     )
 
 
